@@ -12,6 +12,7 @@
   "dependencies": {
     "@vitejs/plugin-react": "latest",
     "html2canvas": "latest",
+    "jspdf": "^4.2.1",
     "qrcode": "latest",
     "react": "latest",
     "react-dom": "latest"
