@@ -1,0 +1,140 @@
+import assert from 'node:assert/strict'
+import { chromium } from 'playwright'
+import QRCode from 'qrcode'
+
+const base = process.env.MICROTOOLS_URL || 'http://127.0.0.1:4173'
+const executablePath = process.env.BROWSER_PATH || 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
+const browser = await chromium.launch({ executablePath, headless: true })
+const context = await browser.newContext({ acceptDownloads: true })
+await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base })
+await context.addInitScript(() => {
+  window.print = () => { document.body.dataset.printed = 'yes' }
+  Object.defineProperty(navigator, 'share', { value: undefined, configurable: true })
+})
+const page = await context.newPage()
+const runtimeErrors = []
+page.on('pageerror', error => runtimeErrors.push(error.message))
+page.on('console', message => { if (message.type() === 'error') runtimeErrors.push(message.text()) })
+
+const qrData = await QRCode.toDataURL('https://microtools.id/verification', { width: 320 })
+const qrBuffer = Buffer.from(qrData.split(',')[1], 'base64')
+const imageFile = { name: 'qris-valid.png', mimeType: 'image/png', buffer: qrBuffer }
+const expectDownload = async button => {
+  const [download] = await Promise.all([page.waitForEvent('download'), button.click()])
+  assert.ok(await download.suggestedFilename())
+  assert.ok(await download.path())
+}
+
+// QRIS Designer: valid upload, reactive preview, templates, PNG, and print.
+await page.goto(`${base}/qris-designer`)
+await page.getByLabel('Nama usaha').fill('Warung Makan Sederhana')
+await page.getByLabel('Judul').fill('Bayar dengan QRIS')
+await page.getByLabel('Gambar QRIS').setInputFiles(imageFile)
+await page.getByLabel('Catatan (opsional)').fill('Terima kasih atas pembayaran Anda')
+const qrisPreview = page.getByTestId('qris-preview')
+await qrisPreview.getByRole('img').waitFor()
+await assertText(qrisPreview, 'Warung Makan Sederhana')
+assert.equal(await page.getByRole('radiogroup', { name: 'Pilih template' }).getByRole('radio').count(), 3)
+await page.getByRole('radio', { name: 'Arch' }).click()
+assert.ok((await qrisPreview.getAttribute('class')).includes('qris-arch'))
+await page.getByRole('radio', { name: 'Minimal' }).click()
+assert.ok((await qrisPreview.getAttribute('class')).includes('qris-minimal'))
+await page.getByLabel('Nama usaha').fill('Warung Sederhana Baru')
+await assertText(qrisPreview, 'Warung Sederhana Baru')
+await expectDownload(page.getByRole('button', { name: 'Unduh PNG' }))
+await page.getByRole('button', { name: 'Cetak' }).click()
+assert.equal(await page.locator('body').getAttribute('data-printed'), 'yes')
+
+// QR Business Card: all contact data, templates, QR/vCard downloads, copy, and share fallback.
+await page.goto(`${base}/qr-business-card`)
+for (const [label, value] of [['Nama','Budi Santoso'],['Jabatan','Founder & CEO'],['Perusahaan','Maju Digital'],['WhatsApp / telepon','081234567890'],['Email','budi@example.id'],['Website','https://budi.id'],['Instagram (opsional)','@budisantoso'],['LinkedIn (opsional)','budi-santoso']]) await page.getByLabel(label).fill(value)
+const businessPreview = page.getByTestId('business-preview')
+await assertText(businessPreview, 'Budi Santoso')
+assert.equal(await page.getByRole('radiogroup', { name: 'Pilih template' }).getByRole('radio').count(), 3)
+await page.getByRole('radio', { name: 'Forest' }).click()
+assert.ok((await businessPreview.getAttribute('class')).includes('business-forest'))
+await page.getByRole('radio', { name: 'Paper' }).click()
+assert.ok((await businessPreview.getAttribute('class')).includes('business-paper'))
+await page.getByLabel('Jabatan').fill('Creative Director')
+await assertText(businessPreview, 'Creative Director')
+await expectDownload(page.getByRole('button', { name: 'Unduh QR' }))
+await expectDownload(page.getByRole('button', { name: 'Unduh vCard' }))
+await page.getByRole('button', { name: 'Salin profil' }).click()
+assert.match(await page.evaluate(() => navigator.clipboard.readText()), /Budi Santoso/)
+await page.getByRole('button', { name: 'Bagikan' }).click()
+assert.match(await page.evaluate(() => navigator.clipboard.readText()), /Creative Director/)
+
+// Invoice: calculations, reactive edits, and print/PDF action.
+await page.goto(`${base}/invoice`)
+await page.getByLabel('Nama usaha').fill('Toko Sinar Jaya')
+await page.getByLabel('Nama pelanggan (opsional)').fill('PT Maju Bersama')
+await page.getByLabel('Nomor invoice').fill('INV-2026-001')
+await page.getByLabel('Pajak (%)').fill('11')
+await page.getByLabel('Nama', { exact: true }).fill('Jasa Desain')
+await page.getByLabel('Jumlah', { exact: true }).fill('2')
+await page.getByLabel('Harga', { exact: true }).fill('50000')
+const invoicePreview = page.getByTestId('invoice-preview')
+await assertText(invoicePreview, '111.000')
+await page.getByLabel('Jumlah', { exact: true }).fill('3')
+await assertText(invoicePreview, '166.500')
+await page.getByLabel('Catatan (opsional)').fill('Lunas melalui transfer bank.')
+await assertText(invoicePreview, 'Lunas melalui transfer bank.')
+await page.getByRole('button', { name: 'Cetak / Simpan PDF' }).click()
+assert.equal(await page.locator('body').getAttribute('data-printed'), 'yes')
+
+// QR Menu: data and template reactivity, share link, popup, QR/image downloads, and sharing.
+await page.goto(`${base}/qr-menu`)
+await page.getByLabel('Nama usaha').fill('Kedai Kopi Kita')
+await page.getByLabel('Judul menu').fill('Menu Spesial')
+await page.getByLabel('WhatsApp pemesanan (opsional)').fill('081234567890')
+await page.getByLabel('Nama', { exact: true }).fill('Espresso')
+await page.getByLabel('Harga', { exact: true }).fill('18000')
+await page.getByLabel('Deskripsi', { exact: true }).fill('Kopi pekat dan aromatik')
+const menuPreview = page.getByTestId('menu-preview')
+await assertText(menuPreview, 'Espresso')
+assert.equal(await page.getByRole('radiogroup', { name: 'Pilih template' }).getByRole('radio').count(), 3)
+await page.getByRole('radio', { name: 'Bistro' }).click()
+assert.ok((await menuPreview.getAttribute('class')).includes('menu-bistro'))
+await page.getByRole('radio', { name: 'Mono' }).click()
+assert.ok((await menuPreview.getAttribute('class')).includes('menu-mono'))
+await page.getByLabel('Harga', { exact: true }).fill('22000')
+await assertText(menuPreview, '22.000')
+await page.getByRole('button', { name: 'Salin link' }).click()
+assert.match(await page.evaluate(() => navigator.clipboard.readText()), /\/menu#/)
+const [menuPopup] = await Promise.all([page.waitForEvent('popup'), page.getByRole('button', { name: 'Buka menu' }).click()])
+await menuPopup.waitForLoadState('domcontentloaded'); assert.ok(menuPopup.url().includes('/menu#')); await menuPopup.getByText('Espresso').waitFor(); await menuPopup.close()
+await expectDownload(page.getByRole('button', { name: 'Unduh QR' }))
+await expectDownload(page.getByRole('button', { name: 'Unduh PNG' }))
+await page.getByRole('button', { name: 'Bagikan' }).click()
+assert.match(await page.evaluate(() => navigator.clipboard.readText()), /\/menu#/)
+
+// Catalog: product preview/image, reactive edits, WhatsApp URL, link/popup, sharing, and HTML download.
+await page.goto(`${base}/catalog`)
+await page.getByLabel('Nama toko').fill('Toko Fashion Kita')
+await page.getByLabel('WhatsApp').fill('081234567890')
+await page.getByLabel('Nama', { exact: true }).fill('Kemeja Linen')
+await page.getByLabel('Harga', { exact: true }).fill('175000')
+await page.getByLabel('Deskripsi', { exact: true }).fill('Bahan linen premium')
+await page.getByLabel('Foto produk 1 (opsional)').setInputFiles(imageFile)
+const catalogPreview = page.getByTestId('catalog-preview')
+await catalogPreview.getByRole('img').waitFor()
+await assertText(catalogPreview, 'Kemeja Linen')
+await page.getByLabel('Harga', { exact: true }).fill('185000')
+await assertText(catalogPreview, '185.000')
+assert.match(await catalogPreview.getByRole('link', { name: 'Pesan via WhatsApp' }).getAttribute('href'), /^https:\/\/wa\.me\/6281234567890/)
+await page.getByRole('button', { name: 'Salin link' }).click()
+assert.match(await page.evaluate(() => navigator.clipboard.readText()), /\/catalog#/)
+const [catalogPopup] = await Promise.all([page.waitForEvent('popup'), page.getByRole('button', { name: 'Buka katalog' }).click()])
+await catalogPopup.waitForLoadState('domcontentloaded'); assert.ok(catalogPopup.url().includes('/catalog#')); await catalogPopup.getByText('Kemeja Linen').waitFor(); await catalogPopup.close()
+await page.getByRole('button', { name: 'Bagikan' }).click()
+assert.match(await page.evaluate(() => navigator.clipboard.readText()), /\/catalog#/)
+await expectDownload(page.getByRole('button', { name: 'Unduh HTML' }))
+
+assert.deepEqual(runtimeErrors, [], `Browser errors: ${runtimeErrors.join(' | ')}`)
+console.log('PASS: 5 fitur, preview reaktif, template, download, copy, print, share, dan link terverifikasi.')
+await browser.close()
+
+async function assertText(locator, expected) {
+  await locator.getByText(expected, { exact: false }).first().waitFor()
+  assert.ok((await locator.textContent()).includes(expected))
+}
